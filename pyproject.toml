@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dwimmy"
+version = "0.1.0"
+description = "Semantic CLI argument correction using lightweight embeddings"
+authors = [{name = "Sarthak Shah", email = "shahsarthakw@gmail.com"}]
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "GPL"}
+# Minimal runtime dependencies - no ML stuff!
+dependencies = [
+    "numpy>=1.20.0",
+    "onnxruntime>=1.15.1",
+]
+
+[project.optional-dependencies]
+# For CLI developers who want to use dwimmy init
+dev = [
+    "sentence-transformers>=2.0.0",
+    "toml>=0.10.0",
+    "tomli>=2.0.0;python_version<'3.11'",
+    "optimum[onnxruntime]>=1.13.2",
+]
+# For testing
+test = [
+    "pytest>=7.0.0",
+    "sentence-transformers>=2.0.0",
+    "optimum[onnxruntime]>=1.13.2",
+    "toml>=0.10.0",
+]
+# Click/Typer support
+click = ["click>=8.0.0"]
+typer = ["typer>=0.9.0"]
+
+# For Developers
+all = [
+    "sentence-transformers>=2.0.0",
+    "click>=8.0.0",
+    "typer>=0.9.0",
+    "toml>=0.10.0",
+    "tomli>=2.0.0;python_version<'3.11'",
+    "optimum[onnxruntime]>=1.13.2",
+]
+
+[project.scripts]
+dwimmy = "dwimmy.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/matchcase/dwimmy"
+Repository = "https://github.com/matchcase/dwimmy"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dwimmy*"]
