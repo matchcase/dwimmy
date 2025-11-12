@@ -2,12 +2,10 @@
 
 import pytest
 import sys
-import pickle
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 from dwimmy.cli import (
-    init_embeddings,
+    generate_embeddings,
     _extract_cli_components,
     _discover_modules,
     _update_pyproject,
@@ -156,14 +154,14 @@ class TestUpdatePyproject:
         assert 'name' in new_content
 
 
-class TestInitEmbeddings:
-    """Test the main init_embeddings function"""
+class TestGenerateEmbeddings:
+    """Test the main generate_embeddings function"""
     
-    def test_init_fails_without_parsers(self, temp_project):
-        """Test that init fails gracefully without CLI modules"""
+    def test_generate_fails_without_parsers(self, temp_project):
+        """Test that generate fails gracefully without CLI modules"""
         embeddings_file = temp_project / '.dwimmy-embeddings'
         
-        success = init_embeddings(
+        success = generate_embeddings(
             parser_modules=['nonexistent.module'],
             output_file=str(embeddings_file),
             pyproject_path=str(temp_project / 'pyproject.toml')
@@ -172,8 +170,8 @@ class TestInitEmbeddings:
         assert not success
         assert not embeddings_file.exists()
     
-    def test_init_extracts_correct_components(self, temp_project):
-        """Test that init correctly identifies CLI components"""
+    def test_generate_extracts_correct_components(self, temp_project):
+        """Test that generate correctly identifies CLI components"""
         sys.path.insert(0, str(temp_project))
         
         try:
@@ -211,10 +209,10 @@ class TestCliIntegration:
         finally:
             sys.argv = original_argv
     
-    def test_cli_init_help(self):
-        """Test that init help command works"""
+    def test_cli_generate_help(self):
+        """Test that generate help command works"""
         original_argv = sys.argv
-        sys.argv = ['dwimmy', 'init', '--help']
+        sys.argv = ['dwimmy', 'generate', '--help']
         
         from dwimmy.cli import main
         
@@ -226,10 +224,10 @@ class TestCliIntegration:
         finally:
             sys.argv = original_argv
     
-    def test_cli_init_no_modules(self):
-        """Test that init fails gracefully with no modules"""
+    def test_cli_generate_no_modules(self):
+        """Test that generate fails gracefully with no modules"""
         original_argv = sys.argv
-        sys.argv = ['dwimmy', 'init', '--modules', 'nonexistent.module']
+        sys.argv = ['dwimmy', 'generate', '--modules', 'nonexistent.module']
         
         from dwimmy.cli import main
         

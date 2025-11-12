@@ -1,12 +1,18 @@
 """Command-line interface for dwimmy - for package developers"""
+from __future__ import annotations
 
 import sys
 import argparse
 from pathlib import Path
 import pickle
-import json
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
+from dwimmy.core.matcher import SemanticMatcher
+if TYPE_CHECKING:
+    import typer
+
+
+from dwimmy.core.utils import SimpleSpinner, is_interactive
 
 def generate_embeddings(
     parser_modules: Optional[List[str]] = None,
@@ -14,9 +20,6 @@ def generate_embeddings(
     pyproject_path: str = 'pyproject.toml'
 ):
     """Generate embeddings and ONNX model for a CLI package"""
-    from dwimmy.core.matcher import SemanticMatcher
-    from dwimmy.core.utils import SimpleSpinner, is_interactive
-    
     print("🔍 Scanning for CLI definitions...", file=sys.stderr)
     
     # Auto-discover parser modules from pyproject.toml if not specified
@@ -31,8 +34,18 @@ def generate_embeddings(
     print(f"Found {len(parser_modules)} module(s): {', '.join(parser_modules)}", 
           file=sys.stderr)
     
+    try:
+        import click
+    except ImportError:
+        click = None
+
+    try:
+        import typer
+    except ImportError:
+        typer = None
+
     # Extract all CLI components
-    all_components = _extract_cli_components(parser_modules)
+    all_components = _extract_cli_components(parser_modules, click=click, typer=typer)
     
     if not all_components:
         print("❌ No ArgumentParser/Click/Typer definitions found", file=sys.stderr)
@@ -169,11 +182,26 @@ def _can_import(module_name: str) -> bool:
         return False
 
 
-def _extract_cli_components(modules: List[str]) -> List[str]:
+def _extract_cli_components(
+    modules: List[str],
+    click: Optional[object] = None,
+    typer: Optional[object] = None,
+) -> List[str]:
     """Extract all CLI component names from modules"""
-    from dwimmy.argparse import ArgumentParser as DwimArgumentParser
     import argparse
     import importlib
+    
+    if click is None:
+        try:
+            import click
+        except ImportError:
+            click = None
+
+    if typer is None:
+        try:
+            import typer
+        except ImportError:
+            typer = None
     
     components = set()
     
@@ -187,28 +215,23 @@ def _extract_cli_components(modules: List[str]) -> List[str]:
             # Reload to get fresh version
             importlib.reload(module)
             
-            # Find all ArgumentParser instances
+            # Find all ArgumentParser, Click, or Typer instances
             for attr_name in dir(module):
                 try:
                     attr = getattr(module, attr_name)
                     
-                    # Check if it's an ArgumentParser (includes DwimArgumentParser)
+                    # argparse
                     if isinstance(attr, argparse.ArgumentParser):
-                        parser = attr
-                        
-                        # Extract flags
-                        for action in parser._actions:
-                            if action.option_strings:
-                                components.update(action.option_strings)
-                            
-                            # Extract choices
-                            if action.choices:
-                                components.update(str(c) for c in action.choices)
-                        
-                        # Extract subcommands
-                        for action in parser._actions:
-                            if isinstance(action, argparse._SubParsersAction):
-                                components.update(action.choices.keys())
+                        _extract_from_argparse(attr, components)
+                    
+                    # click
+                    if click and isinstance(attr, (click.Group, click.Command)):
+                        _extract_from_click(attr, components, click)
+
+                    # typer
+                    if typer and isinstance(attr, typer.Typer):
+                        _extract_from_typer(attr, components, typer, click)
+
                 except (AttributeError, TypeError):
                     # Skip attributes that can't be inspected
                     pass
@@ -221,55 +244,97 @@ def _extract_cli_components(modules: List[str]) -> List[str]:
     return list(components)
 
 
+def _extract_from_argparse(parser: argparse.ArgumentParser, components: set):
+    """Extract components from an argparse.ArgumentParser"""
+    for action in parser._actions:
+        if action.option_strings:
+            components.update(action.option_strings)
+        
+        if action.choices:
+            if isinstance(action, argparse._SubParsersAction):
+                components.update(action.choices.keys())
+            else:
+                components.update(str(c) for c in action.choices)
+
+
+def _extract_from_click(cli_obj, components: set, click: object):
+    """Recursively extract components from a click.Group or click.Command"""
+    if hasattr(cli_obj, 'commands') and isinstance(cli_obj.commands, dict):
+        for name, cmd in cli_obj.commands.items():
+            components.add(name)
+            _extract_from_click(cmd, components, click)
+
+    if hasattr(cli_obj, 'params'):
+        for param in cli_obj.params:
+            components.update(param.opts)
+            if isinstance(param.type, click.Choice):
+                components.update(param.type.choices)
+
+
+def _extract_from_typer(app: 'typer.Typer', components: set, typer: object, click: object):
+    """Extract components from a typer.Typer app"""
+    try:
+        # Convert Typer app to a Click object
+        click_obj = typer.main.get_command(app)
+        # Now, reuse the click extraction logic
+        _extract_from_click(click_obj, components, click)
+    except Exception as e:
+        print(f"⚠️  Failed to extract from typer app: {e}", file=sys.stderr)
+
+
+
 def _update_pyproject(
     pyproject_path: str, 
     embeddings_file: Optional[str] = None,
     model_dir: Optional[str] = None
 ):
-    """Update pyproject.toml to include dwimmy files and package data."""
+    """
+    Update pyproject.toml using tomlkit to preserve formatting and comments.
+    """
     try:
-        import tomllib
+        import tomlkit
     except ImportError:
-        try:
-            import tomli as tomllib
-        except ImportError:
-            print("⚠️  toml library not available, skipping pyproject.toml update", file=sys.stderr)
-            return
+        print("⚠️  tomlkit is not installed. Please run 'pip install dwimmy[dev]'.", file=sys.stderr)
+        return
 
-    try:
-        with open(pyproject_path, 'rb') as f:
-            content = f.read()
-        pyproject = tomllib.loads(content.decode())
-    except FileNotFoundError:
+    pyproject_file = Path(pyproject_path)
+    if not pyproject_file.exists():
         print(f"⚠️  {pyproject_path} not found, skipping update", file=sys.stderr)
         return
+
+    try:
+        content = pyproject_file.read_text()
+        doc = tomlkit.parse(content)
     except Exception as e:
         print(f"⚠️  Failed to parse {pyproject_path}: {e}", file=sys.stderr)
         return
 
-    # Add dwimmy config if not present
-    if 'tool' not in pyproject:
-        pyproject['tool'] = {}
-    if 'dwimmy' not in pyproject['tool']:
-        pyproject['tool']['dwimmy'] = {}
+    # Ensure [tool.dwimmy] exists
+    if 'tool' not in doc:
+        doc.add('tool', tomlkit.table())
+    tool_table = doc['tool']
+    if 'dwimmy' not in tool_table:
+        tool_table.add('dwimmy', tomlkit.table())
+    dwimmy_table = tool_table['dwimmy']
 
     if embeddings_file:
-        pyproject['tool']['dwimmy']['embeddings-file'] = embeddings_file
+        dwimmy_table['embeddings-file'] = embeddings_file
     if model_dir:
-        pyproject['tool']['dwimmy']['model-dir'] = model_dir
+        dwimmy_table['model-dir'] = model_dir
 
-    # Add to package-data (for setuptools)
-    if 'project' in pyproject and 'tool' in pyproject and 'setuptools' in pyproject['tool']:
-        project_name = pyproject.get('project', {}).get('name')
+    # Add to package-data for setuptools
+    if 'tool' in doc and 'setuptools' in doc['tool']:
+        project_name = doc.get('project', {}).get('name')
         if project_name:
             pkg_name = project_name.replace('-', '_')
             
-            if 'package-data' not in pyproject['tool']['setuptools']:
-                pyproject['tool']['setuptools']['package-data'] = {}
-            if pkg_name not in pyproject['tool']['setuptools']['package-data']:
-                pyproject['tool']['setuptools']['package-data'][pkg_name] = []
+            if 'package-data' not in doc['tool']['setuptools']:
+                doc['tool']['setuptools'].add('package-data', tomlkit.table())
+            
+            if pkg_name not in doc['tool']['setuptools']['package-data']:
+                 doc['tool']['setuptools']['package-data'].add(pkg_name, tomlkit.array())
 
-            package_data = pyproject['tool']['setuptools']['package-data'][pkg_name]
+            package_data = doc['tool']['setuptools']['package-data'][pkg_name]
             
             # Add embeddings file if it's not already there
             if embeddings_file and embeddings_file not in package_data:
@@ -281,19 +346,11 @@ def _update_pyproject(
                 if model_glob not in package_data:
                     package_data.append(model_glob)
 
-    _write_toml_safe(pyproject_path, pyproject)
-    print(f"✓ Updated {pyproject_path} with dwimmy configuration", file=sys.stderr)
-
-
-def _write_toml_safe(pyproject_path: str, pyproject: dict):
-    """Write TOML file preserving as much formatting as possible."""
     try:
-        import toml
-        with open(pyproject_path, 'w') as f:
-            toml.dump(pyproject, f)
-    except ImportError:
-        print("⚠️  `toml` library not found, cannot write to pyproject.toml.", file=sys.stderr)
-        print("   Please add `toml` to your dev dependencies.", file=sys.stderr)
+        pyproject_file.write_text(tomlkit.dumps(doc))
+        print(f"✓ Updated {pyproject_path} with dwimmy configuration", file=sys.stderr)
+    except Exception as e:
+        print(f"⚠️  Failed to write to {pyproject_path}: {e}", file=sys.stderr)
 
 
 

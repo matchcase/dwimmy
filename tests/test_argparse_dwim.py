@@ -2,7 +2,7 @@
 
 import pytest
 import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from dwimmy.argparse import ArgumentParser
 from dwimmy.core.matcher import SemanticMatcher
 
